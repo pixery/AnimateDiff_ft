@@ -1,4 +1,4 @@
-name: animatediff
+name: animatediff_ft
 channels:
   - pytorch
   - xformers
@@ -8,13 +8,18 @@ dependencies:
   - torchvision==0.13.1
   - torchaudio==0.12.1
   - cudatoolkit=11.3
-  - xformers
+  - xformers==0.0.20
   - pip
   - pip:
-    - diffusers[torch]==0.11.1
+    - diffusers[torch]
     - transformers==4.25.1
     - imageio==2.27.0
     - gdown
     - einops
     - omegaconf
     - safetensors
+    - decord
+    - opencv-python
+    - scipy
+    - ffmpeg-python
+    - compel

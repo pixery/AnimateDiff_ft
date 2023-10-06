@@ -1,4 +1,5 @@
 # TUmurzakov
+Deneme
 
 1. Train AnimateDiff (24+ frames by multiplying existing module by scale factor and finetune)
    ```

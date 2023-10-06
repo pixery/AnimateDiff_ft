@@ -7,11 +7,10 @@ import os
 from typing import Dict, Optional, Tuple
 from omegaconf import OmegaConf
 from collections import OrderedDict
-
+from diffusers.models import AutoencoderKL, ControlNetModel
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-
 import diffusers
 import transformers
 from accelerate import Accelerator
@@ -23,20 +22,47 @@ from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-
+from PIL import Image
+import numpy as np
 from animatediff.models.unet import UNet3DConditionModel
 from tuneavideo.data.frames_dataset import FramesDataset
 from tuneavideo.data.multi_dataset import MultiTuneAVideoDataset
 from animatediff.pipelines.pipeline_animation import AnimationPipeline
 from tuneavideo.util import save_videos_grid, ddim_inversion
 from einops import rearrange, repeat
-
+from diffusers.image_processor import VaeImageProcessor
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.10.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
+
+TEMPORAL_CONTEXT = 16
+
+def prepare_controlnet_image(
+    image,
+    width,
+    height,
+    device,
+    dtype,
+    *,
+    image_processor,
+):
+    images = []
+    for image_ in image:
+        pil_image = Image.fromarray(image_.cpu().detach().numpy())
+        processed_image = image_processor.preprocess(pil_image, height=height, width=width).to(dtype=torch.float32)
+        numpy_image = np.array(processed_image)
+        tensor_image = torch.tensor(numpy_image).squeeze(0)
+        images.append(tensor_image)
+
+    image = torch.stack(images)
+    image = image.squeeze(0)
+
+    image = image.to(device=device, dtype=dtype)
+
+    return image
 
 def main(
     pretrained_model_path: str,
@@ -73,7 +99,16 @@ def main(
     inference_config_path: str = "configs/inference/inference.yaml",
     motion_module_pe_multiplier: int = 1,
     dataset_class: str = 'MultiTuneAVideoDataset',
+    *,
+    controlnet=None,
+    controlnet_conditioning_scale=1.0,
+    control_guidance_start=0.0,
+    control_guidance_end=1.0,
+    controlnet_images=None,
 ):
+    if controlnet is not None:
+        control_guidance_start, control_guidance_end = [control_guidance_start], [control_guidance_end]
+
     *_, config = inspect.getargvalues(inspect.currentframe())
 
     inference_config = OmegaConf.load(inference_config_path)
@@ -119,6 +154,15 @@ def main(
                                                    subfolder="unet",
                                                    unet_additional_kwargs=OmegaConf.to_container(inference_config.unet_additional_kwargs))
 
+    if controlnet is not None:
+        vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
+        height = unet.config.sample_size * vae_scale_factor
+        width = unet.config.sample_size * vae_scale_factor
+        assert height == 512  # ?
+        assert width == 512  # ?
+        image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor, do_convert_rgb=True, do_normalize=False)
+        prepare_controlnet_image(controlnet_images, width, height, unet.device, unet.dtype, image_processor=image_processor)
+
     motion_module_state_dict = torch.load(motion_module, map_location="cpu")
 
     # Multiply pe weights by multiplier for training more than 24 frames
@@ -136,6 +180,7 @@ def main(
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
+    controlnet.requires_grad_(False)
 
     unet.requires_grad_(False)
     for name, module in unet.named_modules():
@@ -202,6 +247,7 @@ def main(
     validation_pipeline = AnimationPipeline(
         vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
         scheduler=DDIMScheduler(**OmegaConf.to_container(inference_config.noise_scheduler_kwargs['DDIMScheduler'])),
+        controlnet=controlnet,
     )
     validation_pipeline.enable_vae_slicing()
     ddim_inv_scheduler = DDIMScheduler.from_pretrained(pretrained_model_path, subfolder='scheduler')
@@ -216,8 +262,8 @@ def main(
     )
 
     # Prepare everything with our `accelerator`.
-    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader, lr_scheduler
+    unet, optimizer, train_dataloader, lr_scheduler, controlnet = accelerator.prepare(
+        unet, optimizer, train_dataloader, lr_scheduler, controlnet
     )
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
@@ -231,6 +277,7 @@ def main(
     # Move text_encode and vae to gpu and cast to weight_dtype
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
+    controlnet.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
@@ -322,8 +369,33 @@ def main(
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.prediction_type}")
 
+                down_block_res_samples = None
+                mid_block_res_sample = None
+                if controlnet is not None:
+                    control_model_input = noisy_latents
+                    control_model_input = rearrange(control_model_input, "b c f h w -> (b f) c h w")
+                    down_block_res_samples, mid_block_res_sample = controlnet(
+                        control_model_input,
+                        t,
+                        encoder_hidden_states=encoder_hidden_states,
+                        controlnet_cond=controlnet_images,
+                        conditioning_scale=controlnet_conditioning_scale,
+                        guess_mode=False,
+                        return_dict=False,
+                    )
+                    for i in range(len(down_block_res_samples)):
+                        down_block_res_samples[i] = rearrange(
+                                down_block_res_samples[i],
+                                '(b f) c h w -> b c f h w',
+                                f=TEMPORAL_CONTEXT)
+                    mid_block_res_sample = rearrange(
+                            mid_block_res_sample,
+                            '(b f) c h w -> b c f h w',
+                            f=TEMPORAL_CONTEXT)
+
+
                 # Predict the noise residual and compute loss
-                model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+                model_pred = unet(noisy_latents, timesteps, down_block_additional_residuals=down_block_res_samples, mid_block_additional_residual=mid_block_res_sample, encoder_hidden_states=encoder_hidden_states).sample
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 # Gather the losses across all processes for logging (if we use distributed training).

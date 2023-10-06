@@ -5,6 +5,8 @@ from typing import Callable, List, Optional, Union
 from torch.utils.data import Dataset
 from einops import rearrange
 
+from controlnet_aux import OpenposeDetector
+
 
 class MultiTuneAVideoDataset(Dataset):
     def __init__(
@@ -27,6 +29,8 @@ class MultiTuneAVideoDataset(Dataset):
         self.sample_start_idx = sample_start_idx
         self.sample_frame_rate = sample_frame_rate
 
+        self.pose_model = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
+
     def __len__(self):
         return len(self.video_path)
 
@@ -35,11 +39,14 @@ class MultiTuneAVideoDataset(Dataset):
         vr = decord.VideoReader(self.video_path[index], width=self.width, height=self.height)
         sample_index = list(range(self.sample_start_idx, len(vr), self.sample_frame_rate))[:self.n_sample_frames]
         video = vr.get_batch(sample_index)
-        video = rearrange(video, "f h w c -> f c h w")
 
+        pose = self.pose_model(video)
+
+        video = rearrange(video, "f h w c -> f c h w")
         example = {
             "pixel_values": (video / 127.5 - 1.0),
-            "prompt_ids": self.prompt_ids[index]
+            "prompt_ids": self.prompt_ids[index],
+            "poses": pose,
         }
 
         return example

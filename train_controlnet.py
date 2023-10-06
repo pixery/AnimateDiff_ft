@@ -64,7 +64,7 @@ def prepare_controlnet_image(
 
     return image
 
-def main(
+def train(
     pretrained_model_path: str,
     output_dir: str,
     train_data: Dict,
@@ -104,7 +104,6 @@ def main(
     controlnet_conditioning_scale=1.0,
     control_guidance_start=0.0,
     control_guidance_end=1.0,
-    controlnet_images=None,
 ):
     if controlnet is not None:
         control_guidance_start, control_guidance_end = [control_guidance_start], [control_guidance_end]
@@ -378,7 +377,7 @@ def main(
                         control_model_input,
                         t,
                         encoder_hidden_states=encoder_hidden_states,
-                        controlnet_cond=controlnet_images,
+                        controlnet_cond=batch['poses'],
                         conditioning_scale=controlnet_conditioning_scale,
                         guess_mode=False,
                         return_dict=False,
@@ -479,6 +478,11 @@ def save_checkpoint(unet, mm_path):
             mm_state_dict[key] = state_dict[key]
 
     torch.save(mm_state_dict, mm_path)
+
+
+def main(**kwargs):
+    controlnet = ControlNetModel.from_pretrained('lllyasviel/sd-controlnet-openpose')
+    train(controlnet=controlnet, **kwargs)
 
 
 if __name__ == "__main__":

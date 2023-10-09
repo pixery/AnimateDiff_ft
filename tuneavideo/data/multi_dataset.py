@@ -7,6 +7,9 @@ from einops import rearrange
 
 from controlnet_aux import OpenposeDetector
 
+import torch
+import numpy as np
+import os
 
 class MultiTuneAVideoDataset(Dataset):
     def __init__(
@@ -19,6 +22,9 @@ class MultiTuneAVideoDataset(Dataset):
             sample_start_idx: int = 0,
             sample_frame_rate: int = 1,
     ):
+        if isinstance(video_path, str):
+            if os.path.isdir(video_path):
+                video_path =  [os.path.join(video_path, name) for name in os.listdir(video_path) if os.path.isfile(os.path.join(video_path, name))]
         self.video_path = [video_path] if isinstance(video_path, str) else video_path
         self.prompt = [prompt] * len(self.video_path) if isinstance(prompt, str) else prompt
         self.prompt_ids = []
@@ -40,13 +46,13 @@ class MultiTuneAVideoDataset(Dataset):
         sample_index = list(range(self.sample_start_idx, len(vr), self.sample_frame_rate))[:self.n_sample_frames]
         video = vr.get_batch(sample_index)
 
-        pose = self.pose_model(video)
-
+        poses = [self.pose_model(v) for v in video]
+        poses = torch.stack([torch.from_numpy(np.array(p)) for p in poses])
         video = rearrange(video, "f h w c -> f c h w")
         example = {
             "pixel_values": (video / 127.5 - 1.0),
             "prompt_ids": self.prompt_ids[index],
-            "poses": pose,
+            "poses": poses,
         }
 
         return example

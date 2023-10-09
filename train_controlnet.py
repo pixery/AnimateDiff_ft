@@ -101,7 +101,6 @@ def train(
     dataset_class: str = 'MultiTuneAVideoDataset',
     *,
     controlnet=None,
-    controlnet_conditioning_scale=1.0,
     control_guidance_start=0.0,
     control_guidance_end=1.0,
 ):
@@ -109,6 +108,7 @@ def train(
         control_guidance_start, control_guidance_end = [control_guidance_start], [control_guidance_end]
 
     *_, config = inspect.getargvalues(inspect.currentframe())
+    del config['controlnet']
 
     inference_config = OmegaConf.load(inference_config_path)
 
@@ -160,7 +160,6 @@ def train(
         assert height == 512  # ?
         assert width == 512  # ?
         image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor, do_convert_rgb=True, do_normalize=False)
-        prepare_controlnet_image(controlnet_images, width, height, unet.device, unet.dtype, image_processor=image_processor)
 
     motion_module_state_dict = torch.load(motion_module, map_location="cpu")
 
@@ -246,7 +245,7 @@ def train(
     validation_pipeline = AnimationPipeline(
         vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
         scheduler=DDIMScheduler(**OmegaConf.to_container(inference_config.noise_scheduler_kwargs['DDIMScheduler'])),
-        controlnet=controlnet,
+        # controlnet=controlnet,
     )
     validation_pipeline.enable_vae_slicing()
     ddim_inv_scheduler = DDIMScheduler.from_pretrained(pretrained_model_path, subfolder='scheduler')
@@ -371,14 +370,16 @@ def train(
                 down_block_res_samples = None
                 mid_block_res_sample = None
                 if controlnet is not None:
+                    controlnet_images = [prepare_controlnet_image(p, width, height, unet.device, unet.dtype, image_processor=image_processor) for p in batch['poses']]
+                    controlnet_images = torch.cat(controlnet_images, dim=0)
+
                     control_model_input = noisy_latents
                     control_model_input = rearrange(control_model_input, "b c f h w -> (b f) c h w")
                     down_block_res_samples, mid_block_res_sample = controlnet(
                         control_model_input,
-                        t,
-                        encoder_hidden_states=encoder_hidden_states,
-                        controlnet_cond=batch['poses'],
-                        conditioning_scale=controlnet_conditioning_scale,
+                        timesteps,
+                        encoder_hidden_states=encoder_hidden_states.repeat_interleave(TEMPORAL_CONTEXT, dim=0),
+                        controlnet_cond=controlnet_images,
                         guess_mode=False,
                         return_dict=False,
                     )
@@ -489,5 +490,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="./configs/tuneavideo.yaml")
     args = parser.parse_args()
+    # # ! XXX
+    # args = parser.parse_args([
+    #     '--config',
+    #     '/home/avcr/Desktop/cem/animatediff_finetune/AnimateDiff/configs/bunny.yaml'
+    # ])
 
     main(**OmegaConf.load(args.config))

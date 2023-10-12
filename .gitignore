@@ -1,2 +1,5 @@
 test
 *.pyc
+*.png
+*.mp4
+*.gif

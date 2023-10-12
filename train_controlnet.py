@@ -32,6 +32,10 @@ from tuneavideo.util import save_videos_grid, ddim_inversion
 from einops import rearrange, repeat
 from diffusers.image_processor import VaeImageProcessor
 
+from controlnet_aux import OpenposeDetector
+import decord
+decord.bridge.set_bridge('torch')
+
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.10.0.dev0")
 
@@ -245,8 +249,15 @@ def train(
     validation_pipeline = AnimationPipeline(
         vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
         scheduler=DDIMScheduler(**OmegaConf.to_container(inference_config.noise_scheduler_kwargs['DDIMScheduler'])),
-        # controlnet=controlnet,
+        controlnet=controlnet,
     )
+    ####! poses
+    pose_model = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
+    vr = decord.VideoReader("/home/avcr/Desktop/cem/AnimateDiff_ft/controlnet_video_processed/data/zoom_in.mp4", width=512, height=512)
+
+    video = vr.get_batch(list(range(16)))
+    poses = [pose_model(v) for v in video]
+
     validation_pipeline.enable_vae_slicing()
     ddim_inv_scheduler = DDIMScheduler.from_pretrained(pretrained_model_path, subfolder='scheduler')
     ddim_inv_scheduler.set_timesteps(validation_data.num_inv_steps)
@@ -441,7 +452,9 @@ def train(
                             sample = validation_pipeline(prompt, generator=generator,
                                                          latents=ddim_inv_latent,
                                                          fp16=True,
+                                                         image = poses,
                                                          **validation_data).videos
+
                             save_videos_grid(sample, f"{output_dir}/samples/sample-{global_step}/{idx}.gif")
                             samples.append(sample)
                         samples = torch.concat(samples)

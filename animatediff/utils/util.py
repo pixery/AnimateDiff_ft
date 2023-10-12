@@ -22,7 +22,8 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=6, f
         outputs.append(x)
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    imageio.mimsave(path, outputs, duration=len(outputs)/fps)
+    print ("Duration : ", len(outputs) / fps)
+    imageio.mimsave(path, outputs, duration = 1. / fps)
     return outputs
 
 

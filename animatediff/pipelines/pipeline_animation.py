@@ -551,7 +551,10 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoad
 
         images = []
         for image_ in image:
-            pil_image = PIL.Image.fromarray(image_.cpu().detach().numpy())
+            if not isinstance( image_, PIL.Image.Image):
+                pil_image = PIL.Image.fromarray(image_.cpu().detach().numpy())
+            else:
+                pil_image = image_
             processed_image = self.control_image_processor.preprocess(pil_image, height=height, width=width).to(dtype=torch.float32)
             numpy_image = np.array(processed_image)
             tensor_image = torch.tensor(numpy_image).squeeze(0)
